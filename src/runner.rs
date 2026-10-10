@@ -16,6 +16,7 @@ use x_api::backend::{
     get_json_with_retry, post_json_body_oauth2_with_retry as post_json_oauth2_with_retry,
     post_json_with_retry,
 };
+use x_api::http::ProxyConfig;
 use x_api::oauth1::{self, ParamList, Token};
 
 const DEFAULT_NUM_RESULTS: usize = 20;
@@ -136,6 +137,8 @@ where
     }
 
     let context = CommandContext {
+        proxy: matches.get_one::<String>("proxy").cloned(),
+        no_proxy: matches.get_flag("no_proxy"),
         profile_path: matches
             .get_one::<String>("profile")
             .map(PathBuf::from)
@@ -188,13 +191,35 @@ fn execute_remote_with_profile_backend(
         return Err(CommandError::Backend(BackendError::MissingCredentials));
     };
 
-    let mut backend = TwitterBackend::from_credentials(credentials)?;
+    let mut backend =
+        TwitterBackend::from_credentials_with_proxy(credentials, &context.proxy_config(&rcfile))?;
     execute_remote_command(path, leaf, args, context, &mut backend, out, err)
 }
 
 struct CommandContext {
     profile_path: PathBuf,
     color: String,
+    proxy: Option<String>,
+    no_proxy: bool,
+}
+
+impl CommandContext {
+    fn proxy_config(&self, rcfile: &RcFile) -> ProxyConfig {
+        if self.no_proxy {
+            ProxyConfig::Direct
+        } else if let Some(url) = &self.proxy {
+            ProxyConfig::Url(url.clone())
+        } else {
+            rcfile.proxy_config()
+        }
+    }
+
+    fn http_client(&self) -> Result<reqwest::blocking::Client, CommandError> {
+        let rcfile = RcFile::load(&self.profile_path)?;
+        self.proxy_config(&rcfile)
+            .client()
+            .map_err(CommandError::Other)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -305,7 +330,26 @@ fn execute_local_command(
 ) -> Result<Option<i32>, CommandError> {
     match path {
         [single] if single == "authorize" => {
-            run_authorize(leaf, &context.profile_path, out, err)?;
+            run_authorize(leaf, context, out, err)?;
+            Ok(Some(0))
+        }
+        [first, second] if first == "set" && second == "proxy" => {
+            ensure_min_args(path, args, 1)?;
+            if args.len() != 1 {
+                return Err(CommandError::Other(
+                    "Usage: x set proxy <URL|off|auto>".to_string(),
+                ));
+            }
+            let proxy = match args[0].as_str() {
+                "off" => ProxyConfig::Direct,
+                "auto" => ProxyConfig::Inherit,
+                url => ProxyConfig::Url(url.to_string()),
+            };
+            let _ = proxy.builder().map_err(CommandError::Other)?;
+            let mut rcfile = RcFile::load(&context.profile_path)?;
+            rcfile.set_proxy_config(&proxy);
+            rcfile.save(&context.profile_path)?;
+            writeln!(out, "Application proxy settings updated.").ok();
             Ok(Some(0))
         }
         [single] if single == "version" => {
@@ -1129,7 +1173,7 @@ fn execute_remote_command(
             Ok(0)
         }
         [single] if single == "my_location" => {
-            let (_lat, _lng, city, region, country) = ip_geolocation()?;
+            let (_lat, _lng, city, region, country) = ip_geolocation(&context.http_client()?)?;
             let parts: Vec<&str> = [city.as_str(), region.as_str(), country.as_str()]
                 .into_iter()
                 .filter(|s: &&str| !s.is_empty())
@@ -1138,7 +1182,7 @@ fn execute_remote_command(
             Ok(0)
         }
         [single] if single == "nearby_places" => {
-            let (lat, lng) = resolve_geo_coordinates(args)?;
+            let (lat, lng) = resolve_geo_coordinates(args, &context.http_client()?)?;
             let response = backend.get_json(
                 "/1.1/geo/reverse_geocode.json",
                 vec![
@@ -1218,7 +1262,7 @@ fn execute_remote_command(
         [single] if single == "places" => {
             ensure_min_args(path, args, 1)?;
             let query = &args[0];
-            let (lat, lng) = resolve_geo_coordinates(&args[1..])?;
+            let (lat, lng) = resolve_geo_coordinates(&args[1..], &context.http_client()?)?;
             let response = backend.get_json(
                 "/1.1/geo/search.json",
                 vec![
@@ -2869,11 +2913,16 @@ fn print_message(out: &mut dyn Write, from_user: &str, message: &str) {
 
 fn run_authorize(
     leaf: &ArgMatches,
-    profile_path: &std::path::Path,
+    context: &CommandContext,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), CommandError> {
+    let profile_path = &context.profile_path;
     let mut rcfile = RcFile::load(profile_path)?;
+    let client = context
+        .proxy_config(&rcfile)
+        .client()
+        .map_err(CommandError::Other)?;
     let display_uri = opt_bool(leaf, "display-uri");
 
     if rcfile.profiles().is_empty() {
@@ -2924,7 +2973,7 @@ fn run_authorize(
         .filter(|value| !value.trim().is_empty())
         .map_or_else(|| prompt(out, "Enter your API secret:"), Ok)?;
 
-    let (request_token, request_secret) = oauth_request_token(&key, &secret)?;
+    let (request_token, request_secret) = oauth_request_token(&client, &key, &secret)?;
     let authorize_uri = format!(
         "https://api.twitter.com/oauth/authorize?oauth_token={}",
         oauth1::percent_encode(&request_token)
@@ -2949,11 +2998,18 @@ fn run_authorize(
         .filter(|value| !value.trim().is_empty())
         .map_or_else(|| prompt(out, "Enter the supplied PIN:"), Ok)?;
 
-    let (access_token, access_secret, screen_name_hint) =
-        oauth_access_token(&key, &secret, &request_token, &request_secret, &pin)?;
-    let screen_name = oauth_verify_screen_name(&key, &secret, &access_token, &access_secret)
-        .or(screen_name_hint)
-        .unwrap_or_else(|| "authorized_user".to_string());
+    let (access_token, access_secret, screen_name_hint) = oauth_access_token(
+        &client,
+        &key,
+        &secret,
+        &request_token,
+        &request_secret,
+        &pin,
+    )?;
+    let screen_name =
+        oauth_verify_screen_name(&client, &key, &secret, &access_token, &access_secret)
+            .or(screen_name_hint)
+            .unwrap_or_else(|| "authorized_user".to_string());
 
     let credentials = Credentials {
         username: screen_name.clone(),
@@ -2971,12 +3027,17 @@ fn run_authorize(
     Ok(())
 }
 
-fn oauth_request_token(key: &str, secret: &str) -> Result<(String, String), CommandError> {
+fn oauth_request_token(
+    client: &reqwest::blocking::Client,
+    key: &str,
+    secret: &str,
+) -> Result<(String, String), CommandError> {
     let consumer = Token::new(key, secret);
     let mut params = ParamList::new();
     params.insert("oauth_callback".into(), "oob".into());
 
-    let body = oauth1::post(
+    let body = oauth1::post_with_client(
+        client,
         "https://api.twitter.com/oauth/request_token",
         &consumer,
         None,
@@ -3010,6 +3071,7 @@ fn oauth_request_token(key: &str, secret: &str) -> Result<(String, String), Comm
 }
 
 fn oauth_access_token(
+    client: &reqwest::blocking::Client,
     key: &str,
     secret: &str,
     request_token: &str,
@@ -3021,7 +3083,8 @@ fn oauth_access_token(
     let mut params = ParamList::new();
     params.insert("oauth_verifier".into(), pin.trim().into());
 
-    let body = oauth1::post(
+    let body = oauth1::post_with_client(
+        client,
         "https://api.twitter.com/oauth/access_token",
         &consumer,
         Some(&request),
@@ -3059,6 +3122,7 @@ fn oauth_access_token(
 }
 
 fn oauth_verify_screen_name(
+    client: &reqwest::blocking::Client,
     key: &str,
     secret: &str,
     token: &str,
@@ -3068,7 +3132,8 @@ fn oauth_verify_screen_name(
     let access = Token::new(token, token_secret);
     let mut params = ParamList::new();
     params.insert("user.fields".into(), "username".into());
-    let body = oauth1::get(
+    let body = oauth1::get_with_client(
+        client,
         "https://api.twitter.com/2/users/me",
         &consumer,
         Some(&access),
@@ -4829,8 +4894,12 @@ fn format_geo_places(places: &[Value], leaf: &ArgMatches, out: &mut dyn Write) {
     }
 }
 
-fn ip_geolocation() -> Result<(f64, f64, String, String, String), CommandError> {
-    let checkip_body = reqwest::blocking::get("http://checkip.dyndns.org/")
+fn ip_geolocation(
+    client: &reqwest::blocking::Client,
+) -> Result<(f64, f64, String, String, String), CommandError> {
+    let checkip_body = client
+        .get("http://checkip.dyndns.org/")
+        .send()
         .map_err(|e| CommandError::Other(format!("Failed to look up IP address: {e}")))?
         .text()
         .map_err(|e| CommandError::Other(format!("Failed to read IP response: {e}")))?;
@@ -4840,7 +4909,9 @@ fn ip_geolocation() -> Result<(f64, f64, String, String, String), CommandError> 
         .map(|m| m.as_str().to_string())
         .ok_or_else(|| CommandError::Other("Could not parse IP address".to_string()))?;
 
-    let ipinfo_text = reqwest::blocking::get(format!("https://ipinfo.io/{ip}/json"))
+    let ipinfo_text = client
+        .get(format!("https://ipinfo.io/{ip}/json"))
+        .send()
         .map_err(|e| CommandError::Other(format!("Failed to geolocate IP: {e}")))?
         .text()
         .map_err(|e| CommandError::Other(format!("Failed to read geolocation response: {e}")))?;
@@ -4873,11 +4944,16 @@ fn ip_geolocation() -> Result<(f64, f64, String, String, String), CommandError> 
     Ok((lat, lng, city, region, country))
 }
 
-fn geocode_address(address: &str) -> Result<(f64, f64), CommandError> {
+fn geocode_address(
+    address: &str,
+    client: &reqwest::blocking::Client,
+) -> Result<(f64, f64), CommandError> {
     let encoded = serde_urlencoded::to_string([("q", address), ("format", "json"), ("limit", "1")])
         .unwrap_or_default();
     let url = format!("https://nominatim.openstreetmap.org/search?{encoded}");
-    let body = reqwest::blocking::get(&url)
+    let body = client
+        .get(&url)
+        .send()
         .map_err(|e| CommandError::Other(format!("Failed to geocode address: {e}")))?
         .text()
         .map_err(|e| CommandError::Other(format!("Failed to read geocode response: {e}")))?;
@@ -4905,9 +4981,12 @@ fn geocode_address(address: &str) -> Result<(f64, f64), CommandError> {
     Ok((lat, lng))
 }
 
-fn resolve_geo_coordinates(args: &[String]) -> Result<(f64, f64), CommandError> {
+fn resolve_geo_coordinates(
+    args: &[String],
+    client: &reqwest::blocking::Client,
+) -> Result<(f64, f64), CommandError> {
     if args.is_empty() {
-        let (lat, lng, _, _, _) = ip_geolocation()?;
+        let (lat, lng, _, _, _) = ip_geolocation(client)?;
         Ok((lat, lng))
     } else {
         let address = args.join(" ");
@@ -4917,7 +4996,7 @@ fn resolve_geo_coordinates(args: &[String]) -> Result<(f64, f64), CommandError> 
         {
             return Ok((lat, lng));
         }
-        geocode_address(&address)
+        geocode_address(&address, client)
     }
 }
 
@@ -6085,7 +6164,8 @@ mod tests {
     #[test]
     fn resolve_geo_coordinates_parses_lat_lng() {
         let args = vec!["37.7697,-122.3933".to_string()];
-        let (lat, lng) = resolve_geo_coordinates(&args).unwrap();
+        let (lat, lng) =
+            resolve_geo_coordinates(&args, &ProxyConfig::Direct.client().unwrap()).unwrap();
         assert!((lat - 37.7697).abs() < 0.001);
         assert!((lng - (-122.3933)).abs() < 0.001);
     }

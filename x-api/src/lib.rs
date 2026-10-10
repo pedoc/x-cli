@@ -12,5 +12,8 @@ The crate focuses on:
 /// Backend traits and implementations used to call X/Twitter APIs.
 pub mod backend;
 
+#[doc = "Application-level HTTP client and proxy configuration."]
+pub mod http;
+
 /// OAuth 1.0a signing primitives (RFC 5849).
 pub mod oauth1;

@@ -8,6 +8,7 @@ use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 /// Credential record used by profile entries.
 pub use x_api::backend::Credentials;
+use x_api::http::ProxyConfig;
 
 #[derive(Debug, thiserror::Error)]
 /// Errors returned while reading or mutating profile data.
@@ -66,6 +67,16 @@ pub struct Configuration {
         skip_serializing_if = "Option::is_none"
     )]
     pub default_profile: Option<(String, String)>,
+    #[doc = "Optional application-level proxy URL."]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
+    #[doc = "Disable all inherited proxies for this application."]
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub no_proxy: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Clone, Default)]
@@ -75,6 +86,26 @@ pub struct RcFile {
 }
 
 impl RcFile {
+    #[doc = "Returns the saved application proxy selection."]
+    pub fn proxy_config(&self) -> ProxyConfig {
+        if self.data.configuration.no_proxy {
+            ProxyConfig::Direct
+        } else if let Some(url) = &self.data.configuration.proxy {
+            ProxyConfig::Url(url.clone())
+        } else {
+            ProxyConfig::Inherit
+        }
+    }
+
+    #[doc = "Updates application proxy settings without modifying account credentials."]
+    pub fn set_proxy_config(&mut self, proxy: &ProxyConfig) {
+        self.data.configuration.proxy = match proxy {
+            ProxyConfig::Url(url) => Some(url.clone()),
+            _ => None,
+        };
+        self.data.configuration.no_proxy = matches!(proxy, ProxyConfig::Direct);
+    }
+
     /// Loads rc data from `path`.
     ///
     /// If the path does not exist and is named `.xrc`, `.trc` is used as a fallback.

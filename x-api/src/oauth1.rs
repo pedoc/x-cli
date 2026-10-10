@@ -84,6 +84,23 @@ pub fn post(
     access: Option<&Token<'_>>,
     other_params: Option<&ParamList<'_>>,
 ) -> Result<String, String> {
+    post_with_client(
+        &reqwest::blocking::Client::new(),
+        url,
+        consumer,
+        access,
+        other_params,
+    )
+}
+
+#[doc = "Makes a signed OAuth POST request using an explicitly configured HTTP client."]
+pub fn post_with_client(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    consumer: &Token<'_>,
+    access: Option<&Token<'_>>,
+    other_params: Option<&ParamList<'_>>,
+) -> Result<String, String> {
     let auth = authorization_header("POST", url, consumer, access, other_params);
 
     let body: String = other_params
@@ -94,7 +111,7 @@ pub fn post(
         .collect::<Vec<_>>()
         .join("&");
 
-    reqwest::blocking::Client::new()
+    client
         .post(url)
         .header("Authorization", &auth)
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -110,6 +127,23 @@ pub fn post(
 /// `oauth_*` parameters from `other_params` are sent in the Authorization
 /// header; remaining parameters are appended to the URL as a query string.
 pub fn get(
+    url: &str,
+    consumer: &Token<'_>,
+    access: Option<&Token<'_>>,
+    other_params: Option<&ParamList<'_>>,
+) -> Result<String, String> {
+    get_with_client(
+        &reqwest::blocking::Client::new(),
+        url,
+        consumer,
+        access,
+        other_params,
+    )
+}
+
+#[doc = "Makes a signed OAuth GET request using an explicitly configured HTTP client."]
+pub fn get_with_client(
+    client: &reqwest::blocking::Client,
     url: &str,
     consumer: &Token<'_>,
     access: Option<&Token<'_>>,
@@ -131,7 +165,7 @@ pub fn get(
         format!("{url}?{query}")
     };
 
-    reqwest::blocking::Client::new()
+    client
         .get(&request_url)
         .header("Authorization", &auth)
         .send()

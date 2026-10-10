@@ -24,6 +24,34 @@ A command-line interface for the X API.
 - `X_STREAM_MAX_EVENTS` can be set to limit emitted events (useful for tests/automation)
 - Default profile config is `~/.xrc`. If `~/.xrc` is missing, `~/.trc` is used as a read fallback and migrated on write.
 
+## Application proxy
+
+Use a proxy for one invocation without enabling the system proxy:
+
+```powershell
+x --proxy http://127.0.0.1:10808 whoami
+x post "Hello" --proxy http://127.0.0.1:10808
+x --proxy socks5h://127.0.0.1:10808 authorize
+```
+
+Save an application-only setting in the selected profile (default `~/.xrc`):
+
+```powershell
+x set proxy http://127.0.0.1:10808
+x whoami
+x set proxy off
+x set proxy auto
+```
+
+`off` forces direct connections; `auto` removes the application override and
+restores environment/system proxy behavior. `--no-proxy` forces direct
+connections for one invocation. `--proxy` and `--no-proxy` are mutually exclusive.
+Command-line settings take precedence over saved settings, which take precedence
+over environment/system proxies. HTTP, HTTPS, SOCKS5, and SOCKS5 with proxy-side
+DNS (`socks5h`) are supported. Proxy settings apply to API calls, OAuth requests,
+media uploads, streams, and geolocation requests; they do not change browser or
+system settings. Existing login credentials are preserved.
+
 ## Development
 
 ```bash

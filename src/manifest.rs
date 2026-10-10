@@ -104,6 +104,19 @@ pub fn legacy_app_spec() -> AppSpec {
 
     apply_descriptions(&mut commands, "");
 
+    if let Some(set) = commands.iter_mut().find(|command| command.name == "set") {
+        set.subcommands.push(CommandSpec {
+            name: "proxy".to_string(),
+            method: "proxy".to_string(),
+            about: "Save an application proxy URL, off (direct), or auto (inherited).".to_string(),
+            min_args: 1,
+            options: Vec::new(),
+            aliases: Vec::new(),
+            subcommand_class: None,
+            subcommands: Vec::new(),
+        });
+    }
+
     AppSpec {
         class_options,
         commands,
@@ -123,6 +136,23 @@ pub fn clap_command(app_spec: &AppSpec) -> Command {
     for class_option in &app_spec.class_options {
         command = command.arg(build_arg(class_option, true));
     }
+
+    command = command
+        .arg(
+            Arg::new("proxy")
+                .long("proxy")
+                .value_name("URL")
+                .global(true)
+                .conflicts_with("no_proxy")
+                .help("Use this proxy instead of application, environment, or system settings"),
+        )
+        .arg(
+            Arg::new("no_proxy")
+                .long("no-proxy")
+                .global(true)
+                .action(ArgAction::SetTrue)
+                .help("Connect directly, ignoring all proxy settings"),
+        );
 
     // Ruby exposes -v/--version via aliasing to the version command.
     if app_spec

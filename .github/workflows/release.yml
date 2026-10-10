@@ -103,8 +103,8 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --bin x --target ${{ matrix.target }}
 
-      - name: Test authorization and CLI behavior
-        run: cargo test --release --locked --target ${{ matrix.target }} --lib --test cli_behavior
+      - name: Test authorization, CLI behavior, and proxy configuration
+        run: cargo test --release --locked --target ${{ matrix.target }} --lib --test cli_behavior --test proxy_configuration
 
       - name: Smoke test release binary
         shell: bash

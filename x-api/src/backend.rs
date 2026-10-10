@@ -276,6 +276,14 @@ impl TwitterBackend {
     /// 2. `T_BEARER_TOKEN`
     /// 3. [`Credentials::bearer_token`]
     pub fn from_credentials(credentials: Credentials) -> Result<Self, BackendError> {
+        Self::from_credentials_with_proxy(credentials, &crate::http::ProxyConfig::Inherit)
+    }
+
+    #[doc = "Creates a backend with an application-level proxy selection."]
+    pub fn from_credentials_with_proxy(
+        credentials: Credentials,
+        proxy: &crate::http::ProxyConfig,
+    ) -> Result<Self, BackendError> {
         let bearer_token = std::env::var("X_BEARER_TOKEN")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -286,7 +294,9 @@ impl TwitterBackend {
             })
             .or_else(|| credentials.bearer_token.clone());
 
-        let client = Client::builder()
+        let client = proxy
+            .builder()
+            .map_err(BackendError::Http)?
             .user_agent("x-rust/5.0")
             .build()
             .map_err(|error| BackendError::Http(error.to_string()))?;
