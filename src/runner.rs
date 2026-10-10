@@ -151,7 +151,7 @@ where
         .map(|values| values.cloned().collect::<Vec<_>>())
         .unwrap_or_default();
 
-    let result = match execute_local_command(&path, leaf, &args, &context, out) {
+    let result = match execute_local_command(&path, leaf, &args, &context, out, err) {
         Ok(Some(exit_code)) => Ok(exit_code),
         Ok(None) => match backend_override {
             Some(backend) => {
@@ -301,8 +301,13 @@ fn execute_local_command(
     args: &[String],
     context: &CommandContext,
     out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<Option<i32>, CommandError> {
     match path {
+        [single] if single == "authorize" => {
+            run_authorize(leaf, &context.profile_path, out, err)?;
+            Ok(Some(0))
+        }
         [single] if single == "version" => {
             writeln!(out, "{}", env!("CARGO_PKG_VERSION")).ok();
             Ok(Some(0))
@@ -381,10 +386,6 @@ fn execute_remote_command(
         .unwrap_or_else(|| "unknown".to_string());
 
     match path {
-        [single] if single == "authorize" => {
-            run_authorize(leaf, &context.profile_path, out, err)?;
-            Ok(0)
-        }
         [single] if single == "open" => {
             ensure_min_args(path, args, 1)?;
             if opt_bool(leaf, "status") {
@@ -2878,7 +2879,7 @@ fn run_authorize(
     if rcfile.profiles().is_empty() {
         writeln!(
             out,
-            "Welcome! Before you can use t, you'll first need to register an"
+            "Welcome! Before you can use x, you'll first need to register an"
         )?;
         writeln!(
             out,
@@ -2917,11 +2918,11 @@ fn run_authorize(
     let key = std::env::var("T_AUTHORIZE_API_KEY")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or(prompt(out, "Enter your API key:")?);
+        .map_or_else(|| prompt(out, "Enter your API key:"), Ok)?;
     let secret = std::env::var("T_AUTHORIZE_API_SECRET")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or(prompt(out, "Enter your API secret:")?);
+        .map_or_else(|| prompt(out, "Enter your API secret:"), Ok)?;
 
     let (request_token, request_secret) = oauth_request_token(&key, &secret)?;
     let authorize_uri = format!(
@@ -2946,7 +2947,7 @@ fn run_authorize(
     let pin = std::env::var("T_AUTHORIZE_PIN")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or(prompt(out, "Enter the supplied PIN:")?);
+        .map_or_else(|| prompt(out, "Enter the supplied PIN:"), Ok)?;
 
     let (access_token, access_secret, screen_name_hint) =
         oauth_access_token(&key, &secret, &request_token, &request_secret, &pin)?;
@@ -3090,7 +3091,12 @@ fn prompt(out: &mut dyn Write, label: &str) -> Result<String, io::Error> {
     write!(out, "{} ", label)?;
     out.flush()?;
     let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
+    if io::stdin().read_line(&mut input)? == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "standard input closed before a response was entered",
+        ));
+    }
     Ok(input.trim_end_matches(['\r', '\n']).to_string())
 }
 

@@ -145,3 +145,85 @@ fn timeline_without_credentials_returns_authorization_error() {
             "No active credentials found in profile",
         ));
 }
+
+#[test]
+fn authorize_without_credentials_reaches_interactive_prompt() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let missing_profile = temp.path().join("missing.xrc");
+    let empty_profile = temp.path().join("empty.xrc");
+    fs::write(&empty_profile, "configuration: {}\nprofiles: {}\n")
+        .expect("empty profile should be written");
+
+    for profile in [&missing_profile, &empty_profile] {
+        let mut cmd = cargo_bin_cmd!("x");
+        cmd.args([
+            "authorize",
+            "--display-uri",
+            "--profile",
+            utf8_path(profile),
+        ])
+        .env_remove("T_AUTHORIZE_API_KEY")
+        .env_remove("T_AUTHORIZE_API_SECRET")
+        .write_stdin("\n")
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("Welcome!"))
+        .stdout(predicate::str::contains("Enter your API key:"))
+        .stderr(predicate::str::contains("standard input closed"))
+        .stderr(predicate::str::contains("No active credentials").not());
+    }
+
+    assert!(!missing_profile.exists());
+}
+
+#[test]
+fn authorize_with_existing_profile_reaches_interactive_prompt() {
+    let (_temp, profile) = sample_profile();
+    let original = fs::read_to_string(&profile).expect("profile should be readable");
+    let mut cmd = cargo_bin_cmd!("x");
+    cmd.args([
+        "authorize",
+        "--display-uri",
+        "--profile",
+        utf8_path(&profile),
+    ])
+    .env_remove("T_AUTHORIZE_API_KEY")
+    .env_remove("T_AUTHORIZE_API_SECRET")
+    .write_stdin("\n")
+    .assert()
+    .code(1)
+    .stdout(predicate::str::contains(
+        "already registered an application",
+    ))
+    .stdout(predicate::str::contains("Enter your API key:"))
+    .stderr(predicate::str::contains("standard input closed"))
+    .stderr(predicate::str::contains("No active credentials").not());
+
+    assert_eq!(
+        fs::read_to_string(&profile).expect("profile should be readable"),
+        original
+    );
+}
+
+#[test]
+fn authorize_with_api_key_environment_skips_key_prompt() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let profile = temp.path().join("missing.xrc");
+    let mut cmd = cargo_bin_cmd!("x");
+    cmd.args([
+        "authorize",
+        "--display-uri",
+        "--profile",
+        utf8_path(&profile),
+    ])
+    .env("T_AUTHORIZE_API_KEY", "test-api-key")
+    .env_remove("T_AUTHORIZE_API_SECRET")
+    .write_stdin("\n")
+    .assert()
+    .code(1)
+    .stdout(predicate::str::contains("Enter your API secret:"))
+    .stdout(predicate::str::contains("Enter your API key:").not())
+    .stderr(predicate::str::contains("standard input closed"));
+
+    assert!(!profile.exists());
+}

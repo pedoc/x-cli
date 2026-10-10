@@ -1,6 +1,6 @@
 [package]
 name = "x"
-version = "6.0.0"
+version = "6.0.0-fork.2"
 edition = "2024"
 description = "Command-line interface for the X API"
 license = "MIT"
