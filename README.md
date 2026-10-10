@@ -56,3 +56,19 @@ cargo release-tag
 ```
 
 Tag messages come from `Cargo.toml` release metadata (`tag-message`).
+
+### Fork releases
+
+You can also open **Actions -> Release -> Run workflow**, select the source
+branch, and enter a release tag such as `v6.0.0-fork.1`. The workflow builds the
+selected commit and creates the tag and GitHub Release only after all six
+platform builds and binary smoke tests succeed. If a tag already exists, it
+must point to the selected commit; existing tags are never moved.
+
+Each release includes `.tar.gz` archives for Linux and macOS, `.zip` archives
+for Windows, and `SHA256SUMS.txt`. Archives contain the executable, README,
+and license; Unix archives also include the manual page. Windows users can
+extract the matching archive and run `x.exe version` without installing Rust.
+
+This CLI uses the official X API. Building or downloading it does not remove
+X API access requirements, usage charges, or platform rate limits.

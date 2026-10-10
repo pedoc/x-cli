@@ -4,87 +4,139 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (for example, v6.0.0 or v6.0.0-fork.1)"
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-          - os: macos-13
-            target: x86_64-apple-darwin
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
+  prepare:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.release.outputs.commit }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release source
+        id: release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release tag must be a version such as v6.0.0 or v6.0.0-fork.1."
+            exit 1
+          fi
+          git check-ref-format "refs/tags/$RELEASE_TAG"
+          commit=$(git rev-parse HEAD)
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            tagged_commit=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+            if [[ "$tagged_commit" != "$commit" ]]; then
+              echo "::error::Release tag already points to another commit. Select that tag as the workflow ref or use a new tag."
+              exit 1
+            fi
+          fi
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            binary: x
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: x
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            binary: x
+          - os: macos-15
+            target: aarch64-apple-darwin
+            binary: x
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            binary: x.exe
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            binary: x.exe
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      BINARY_PATH: target/${{ matrix.target }}/release/${{ matrix.binary }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
-
-      - name: Add target
-        run: rustup target add ${{ matrix.target }}
-
-      - name: Install cross-compilation toolchain
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          target: ${{ matrix.target }}
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
         run: cargo build --release --locked --bin x --target ${{ matrix.target }}
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Smoke test release binary
+        shell: bash
+        run: '"$BINARY_PATH" version'
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
+        shell: bash
         run: |
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/x" x
-          cp man/x.1 x.1
-          tar -czf "dist/x-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" x x.1
+          mkdir -p dist/package
+          cp "$BINARY_PATH" README.md LICENSE.md man/x.1 dist/package/
+          tar -czf "dist/x-$RELEASE_TAG-${{ matrix.target }}.tar.gz" -C dist/package x x.1 README.md LICENSE.md
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/x.exe" "x.exe"
-          Compress-Archive -Path "x.exe" -DestinationPath "dist/x-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          New-Item -ItemType Directory -Force dist/package | Out-Null
+          Copy-Item $env:BINARY_PATH, README.md, LICENSE.md -Destination dist/package
+          Compress-Archive -Path dist/package/* -DestinationPath "dist/x-$env:RELEASE_TAG-${{ matrix.target }}.zip"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
           name: x-${{ matrix.target }}
-          path: dist/*
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
 
   release:
     name: Publish release assets
-    needs: build
-    runs-on: ubuntu-latest
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
 
@@ -103,5 +155,8 @@ jobs:
       - name: Attach assets to release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ needs.prepare.outputs.commit }}
           files: dist/*
+          fail_on_unmatched_files: true
           generate_release_notes: true
